@@ -25,22 +25,32 @@ def get_m3u8():
             tmp.close()
             cookiefile = tmp.name
 
-        # ✅ Step 2: Pass that file path to yt-dlp
+        # ✅ Step 2: yt-dlp options (stabilized)
         ydl_opts = {
-            "quiet": True,
-            "skip_download": True,
-            "cookiefile": cookiefile,
+            "quiet": True,                  # suppress detailed logs
+            "skip_download": True,          # we only need info, not the file
+            "cookiefile": cookiefile,       # use cookies for auth/trust
+            "sleep_interval_requests": 1,   # prevent HTTP 429 (Too Many Requests)
+            "ignoreerrors": True,           # skip any minor extraction errors
+            "no_warnings": True,            # hide warnings in console/logs
         }
 
+        # ✅ Step 3: Extract info using yt-dlp
         with YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(video, download=False)
 
-        # ✅ Step 3: Return m3u8 if found
+        # ✅ Step 4: Return .m3u8 if found
         formats = info.get("formats", [])
         for f in formats:
             if "m3u8" in (f.get("protocol") or ""):
-                return jsonify({"m3u8": f["url"], "title": info.get("title")})
+                return jsonify({
+                    "m3u8": f["url"],
+                    "title": info.get("title"),
+                    "id": info.get("id"),
+                    "uploader": info.get("uploader")
+                })
         return jsonify({"error": "no m3u8 found", "title": info.get("title")})
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -51,6 +61,7 @@ def home():
         "usage": "/api/m3u8?id=VIDEO_ID",
         "example": "/api/m3u8?id=5qap5aO4i9A"
     })
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
