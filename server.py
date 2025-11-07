@@ -1,6 +1,6 @@
 from flask import Flask, request, jsonify
 from yt_dlp import YoutubeDL
-import os, tempfile
+import os, tempfile, textwrap
 
 app = Flask(__name__)
 
@@ -14,24 +14,28 @@ def get_m3u8():
         video = f"https://www.youtube.com/watch?v={video}"
 
     try:
-        # 🔒 Write the COOKIES env var to a temporary file
+        # ✅ Step 1: Write COOKIES env var into a real file (handle newlines)
+        cookies_env = os.getenv("COOKIES")
         cookiefile = None
-        cookies_data = os.getenv("COOKIES")
-        if cookies_data:
-            tmp = tempfile.NamedTemporaryFile(delete=False)
-            tmp.write(cookies_data.encode())
+        if cookies_env:
+            tmp = tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".txt")
+            # Reinsert newlines if Render stripped them
+            cookies_text = cookies_env.replace("\\n", "\n").strip()
+            tmp.write(cookies_text)
             tmp.close()
             cookiefile = tmp.name
 
+        # ✅ Step 2: Pass that file path to yt-dlp
         ydl_opts = {
             "quiet": True,
             "skip_download": True,
-            "cookiefile": cookiefile  # 👈 this is the fix
+            "cookiefile": cookiefile,
         }
 
         with YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(video, download=False)
 
+        # ✅ Step 3: Return m3u8 if found
         formats = info.get("formats", [])
         for f in formats:
             if "m3u8" in (f.get("protocol") or ""):
