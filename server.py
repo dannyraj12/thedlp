@@ -1,6 +1,6 @@
 from flask import Flask, request, jsonify
 from yt_dlp import YoutubeDL
-import os
+import os, tempfile
 
 app = Flask(__name__)
 
@@ -14,7 +14,21 @@ def get_m3u8():
         video = f"https://www.youtube.com/watch?v={video}"
 
     try:
-        ydl_opts = {"quiet": True, "skip_download": True}
+        # 🔒 Write the COOKIES env var to a temporary file
+        cookiefile = None
+        cookies_data = os.getenv("COOKIES")
+        if cookies_data:
+            tmp = tempfile.NamedTemporaryFile(delete=False)
+            tmp.write(cookies_data.encode())
+            tmp.close()
+            cookiefile = tmp.name
+
+        ydl_opts = {
+            "quiet": True,
+            "skip_download": True,
+            "cookiefile": cookiefile  # 👈 this is the fix
+        }
+
         with YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(video, download=False)
 
