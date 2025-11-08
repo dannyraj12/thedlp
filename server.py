@@ -2,58 +2,87 @@
 # playwright install chromium
 from flask import Flask, request, jsonify
 from playwright.sync_api import sync_playwright
-import os, tempfile, threading, queue, time
+import os, json, threading, queue, time, traceback
 
 app = Flask(__name__)
 
-# Queue for job requests (url -> result)
 job_queue = queue.Queue()
 result_dict = {}
 
 def worker():
-    """Background thread owning the Playwright browser."""
+    """Background thread that holds a persistent Playwright browser."""
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-gpu",
-                "--disable-dev-shm-usage",
-                "--disable-software-rasterizer",
-                "--disable-background-timer-throttling",
-                "--disable-renderer-backgrounding",
-            ],
-        )
-        context = browser.new_context()
-        print("✅ Playwright worker started (browser persistent).")
+        try:
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-gpu",
+                    "--disable-dev-shm-usage",
+                    "--disable-software-rasterizer",
+                    "--disable-background-timer-throttling",
+                    "--disable-renderer-backgrounding",
+                    "--window-size=1280,720",
+                ],
+            )
+            context = browser.new_context()
+            print("✅ Chromium launched successfully.")
+        except Exception as e:
+            print("❌ Failed to launch Chromium:", e)
+            return
+
+        # 🍪 Load cookies from environment (if provided)
+        cookies_json = os.getenv("COOKIES")
+        if cookies_json:
+            try:
+                cookies = json.loads(cookies_json)
+                for c in cookies:
+                    c.setdefault("sameSite", "None")
+                context.add_cookies(cookies)
+                print(f"🍪 Added {len(cookies)} cookies from environment.")
+            except Exception as e:
+                print(f"⚠️ Failed to parse or add cookies: {e}")
+        else:
+            print("⚠️ No COOKIES environment variable found.")
+
+        print("✅ Playwright worker started and ready.")
+
         while True:
             job = job_queue.get()
             if job is None:
                 break
             url, job_id = job
+            print(f"🔍 Processing: {url}")
             try:
                 page = context.new_page()
-                page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                page.wait_for_function("window.ytInitialPlayerResponse !== undefined", timeout=15000)
+                page.set_default_navigation_timeout(60000)
+                page.goto(url, wait_until="domcontentloaded")
+                page.wait_for_function("window.ytInitialPlayerResponse !== undefined", timeout=60000)
                 js = page.evaluate("window.ytInitialPlayerResponse") or {}
                 page.close()
+
                 streaming = js.get("streamingData", {})
                 hls = streaming.get("hlsManifestUrl")
                 data = (
-                    {"hlsManifestUrl": hls}
+                    {"hlsManifestUrl": hls, "cookies_used": bool(cookies_json)}
                     if hls
                     else {"error": "No hlsManifestUrl found (not live/DVR)"}
                 )
             except Exception as e:
+                err = traceback.format_exc(limit=1)
+                print("❌ Error extracting HLS:", err)
                 data = {"error": str(e)}
             result_dict[job_id] = data
             job_queue.task_done()
+
         context.close()
         browser.close()
-        print("🛑 Browser closed.")
+        print("🛑 Browser closed. Worker stopped.")
 
-# Start the worker thread once
+
+# Start background browser thread once
 threading.Thread(target=worker, daemon=True).start()
+
 
 @app.route("/api/hls")
 def get_hls():
@@ -63,16 +92,19 @@ def get_hls():
 
     job_id = str(time.time())
     job_queue.put((url, job_id))
-    job_queue.join()  # wait for the worker to finish
+    job_queue.join()  # Wait for the job to finish
+
     return jsonify(result_dict.pop(job_id, {"error": "No result"}))
+
 
 @app.route("/")
 def home():
     return jsonify({
         "usage": "/api/hls?url=<YouTube_URL>",
         "example": "/api/hls?url=https://www.youtube.com/watch?v=5qap5aO4i9A",
-        "note": "Returns hlsManifestUrl for live/DVR streams (≤1080 p)."
+        "note": "Extracts hlsManifestUrl (auto-quality) using Playwright + cookies."
     })
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
