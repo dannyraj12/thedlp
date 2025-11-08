@@ -1,9 +1,9 @@
-# pip install flask playwright playwright-stealth
+# pip install flask playwright playwright-stealth==1.1.1
 # playwright install chromium
 
 from flask import Flask, request, jsonify
 from playwright.sync_api import sync_playwright
-from playwright_stealth import Stealth  # ✅ latest API import
+from playwright_stealth import Stealth  # ✅ class-based API (v1.1.1)
 import os, json, threading, queue, time, traceback, re
 
 app = Flask(__name__)
@@ -31,7 +31,7 @@ def worker():
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                            "AppleWebKit/537.36 (KHTML, like Gecko) "
                            "Chrome/120.0 Safari/537.36",
-                viewport={"width": 1280, "height": 720}
+                viewport={"width":1280, "height":720}
             )
             print("✅ Chromium launched successfully.")
         except Exception as e:
@@ -54,33 +54,31 @@ def worker():
 
         print("✅ Playwright worker started (browser persistent).")
 
+        stealth_tool = Stealth()  # ✅ v1.1.1 API
+
         while True:
             job = job_queue.get()
             if job is None:
                 break
-
             url, job_id = job
             print(f"🔍 Processing: {url}")
-
             try:
                 page = context.new_page()
-                Stealth(page)  # ✅ new API automatically applies stealth
+                stealth_tool.apply_stealth(page)  # ✅ this works for 1.1.1
                 page.set_default_navigation_timeout(60000)
                 page.goto(url, wait_until="networkidle")
 
-                # Try to extract ytInitialPlayerResponse
                 try:
                     js = page.evaluate("window.ytInitialPlayerResponse") or {}
-                except Exception:
+                except:
                     html = page.content()
-                    match = re.search(r"ytInitialPlayerResponse\s*=\s*(\{.*?\})\s*;", html)
+                    match = re.search(r"ytInitialPlayerResponse\\s*=\\s*(\\{.*?\\})\\s*;", html)
                     js = json.loads(match.group(1)) if match else {}
 
                 page.close()
 
                 streaming = js.get("streamingData", {})
                 hls = streaming.get("hlsManifestUrl")
-
                 data = (
                     {"hlsManifestUrl": hls, "cookies_used": bool(cookies_json), "stealth": True}
                     if hls
@@ -100,7 +98,6 @@ def worker():
         print("🛑 Browser closed. Worker stopped.")
 
 
-# Start the background worker once
 threading.Thread(target=worker, daemon=True).start()
 
 
@@ -113,7 +110,6 @@ def get_hls():
     job_id = str(time.time())
     job_queue.put((url, job_id))
     job_queue.join()
-
     return jsonify(result_dict.pop(job_id, {"error": "No result"}))
 
 
