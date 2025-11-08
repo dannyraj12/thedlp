@@ -3,7 +3,7 @@
 
 from flask import Flask, request, jsonify
 from playwright.sync_api import sync_playwright
-from playwright_stealth.stealth import stealth  # ✅ Correct import
+from playwright_stealth import Stealth  # ✅ new class-based import
 import os, json, threading, queue, time, traceback, re
 
 app = Flask(__name__)
@@ -53,6 +53,8 @@ def worker():
 
         print("✅ Playwright worker started (browser persistent).")
 
+        stealth_tool = Stealth()  # ✅ instantiate the Stealth handler
+
         while True:
             job = job_queue.get()
             if job is None:
@@ -61,7 +63,7 @@ def worker():
             print(f"🔍 Processing: {url}")
             try:
                 page = context.new_page()
-                stealth(page)  # ✅ Proper stealth usage
+                stealth_tool.apply_stealth(page)  # ✅ correct call
                 page.set_default_navigation_timeout(60000)
                 page.goto(url, wait_until="networkidle")
 
@@ -116,7 +118,7 @@ def home():
     return jsonify({
         "usage": "/api/hls?url=<YouTube_URL>",
         "example": "/api/hls?url=https://www.youtube.com/watch?v=5qap5aO4i9A",
-        "note": "Extracts hlsManifestUrl (auto-quality) using Playwright + stealth + cookies."
+        "note": "Extracts hlsManifestUrl (auto-quality) using Playwright + Stealth + Cookies."
     })
 
 
