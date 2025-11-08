@@ -1,8 +1,9 @@
-# pip install flask playwright
+# pip install flask playwright playwright-stealth
 # playwright install chromium
 from flask import Flask, request, jsonify
 from playwright.sync_api import sync_playwright
-import os, json, threading, queue, time, traceback
+from playwright_stealth import stealth_sync
+import os, json, threading, queue, time, traceback, re
 
 app = Flask(__name__)
 
@@ -10,7 +11,7 @@ job_queue = queue.Queue()
 result_dict = {}
 
 def worker():
-    """Background thread that holds a persistent Playwright browser."""
+    """Background worker that holds the persistent Playwright browser."""
     with sync_playwright() as p:
         try:
             browser = p.chromium.launch(
@@ -25,13 +26,17 @@ def worker():
                     "--window-size=1280,720",
                 ],
             )
-            context = browser.new_context()
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                           "(KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+                viewport={"width":1280, "height":720}
+            )
             print("✅ Chromium launched successfully.")
         except Exception as e:
             print("❌ Failed to launch Chromium:", e)
             return
 
-        # 🍪 Load cookies from environment (if provided)
+        # 🍪 Load cookies from environment
         cookies_json = os.getenv("COOKIES")
         if cookies_json:
             try:
@@ -45,7 +50,7 @@ def worker():
         else:
             print("⚠️ No COOKIES environment variable found.")
 
-        print("✅ Playwright worker started and ready.")
+        print("✅ Playwright worker started (browser persistent).")
 
         while True:
             job = job_queue.get()
@@ -55,23 +60,32 @@ def worker():
             print(f"🔍 Processing: {url}")
             try:
                 page = context.new_page()
+                stealth_sync(page)  # 👈 makes Chromium undetectable
                 page.set_default_navigation_timeout(60000)
-                page.goto(url, wait_until="domcontentloaded")
-                page.wait_for_function("window.ytInitialPlayerResponse !== undefined", timeout=60000)
-                js = page.evaluate("window.ytInitialPlayerResponse") or {}
-                page.close()
+                page.goto(url, wait_until="networkidle")
 
+                # Try to get player response
+                try:
+                    js = page.evaluate("window.ytInitialPlayerResponse") or {}
+                except:
+                    html = page.content()
+                    match = re.search(r"ytInitialPlayerResponse\s*=\s*(\{.*?\})\s*;", html)
+                    js = json.loads(match.group(1)) if match else {}
+
+                page.close()
                 streaming = js.get("streamingData", {})
                 hls = streaming.get("hlsManifestUrl")
+
                 data = (
-                    {"hlsManifestUrl": hls, "cookies_used": bool(cookies_json)}
+                    {"hlsManifestUrl": hls, "cookies_used": bool(cookies_json), "stealth": True}
                     if hls
-                    else {"error": "No hlsManifestUrl found (not live/DVR)"}
+                    else {"error": "No hlsManifestUrl found (not live/DVR)", "stealth": True}
                 )
             except Exception as e:
                 err = traceback.format_exc(limit=1)
                 print("❌ Error extracting HLS:", err)
-                data = {"error": str(e)}
+                data = {"error": str(e), "stealth": True}
+
             result_dict[job_id] = data
             job_queue.task_done()
 
@@ -80,7 +94,7 @@ def worker():
         print("🛑 Browser closed. Worker stopped.")
 
 
-# Start background browser thread once
+# Start the worker thread once
 threading.Thread(target=worker, daemon=True).start()
 
 
@@ -92,8 +106,7 @@ def get_hls():
 
     job_id = str(time.time())
     job_queue.put((url, job_id))
-    job_queue.join()  # Wait for the job to finish
-
+    job_queue.join()
     return jsonify(result_dict.pop(job_id, {"error": "No result"}))
 
 
@@ -102,7 +115,7 @@ def home():
     return jsonify({
         "usage": "/api/hls?url=<YouTube_URL>",
         "example": "/api/hls?url=https://www.youtube.com/watch?v=5qap5aO4i9A",
-        "note": "Extracts hlsManifestUrl (auto-quality) using Playwright + cookies."
+        "note": "Extracts hlsManifestUrl (auto-quality) using Playwright + stealth + cookies."
     })
 
 
