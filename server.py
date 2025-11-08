@@ -1,40 +1,58 @@
-# pip install flask playwright
+# pip install flask playwright requests
 # playwright install chromium
 
 from flask import Flask, request, jsonify
 from playwright.sync_api import sync_playwright
-import os, threading, queue, time, subprocess, re, json
+import os, threading, queue, time, subprocess, re, json, requests
 
 app = Flask(__name__)
 
-# ─────────────────────────────────────────────
-# ✅ Ensure Chromium installs every time Render restarts
-# ─────────────────────────────────────────────
 os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "/tmp/playwright"
 subprocess.run(["playwright", "install", "chromium"], check=False)
 
-# ─────────────────────────────────────────────
-# ✅ Persistent Playwright Worker Setup
-# ─────────────────────────────────────────────
 job_queue = queue.Queue()
 result_dict = {}
 
+def extract_with_playwright(url, context):
+    """Try to extract using Playwright (JS or HTML parsing)."""
+    page = context.new_page()
+    page.goto(url, wait_until="networkidle", timeout=120000)
+    time.sleep(3)
+
+    # Try direct JS
+    js = page.evaluate("window.ytInitialPlayerResponse || null")
+    if not js:
+        html = page.content()
+        match = re.search(r"ytInitialPlayerResponse\s*=\s*(\{.*?\})\s*;", html)
+        if match:
+            try:
+                js = json.loads(match.group(1))
+            except Exception:
+                js = None
+    page.close()
+    return js
+
+def fallback_get_info(video_id):
+    """Use YouTube public info endpoint as fallback."""
+    try:
+        params = {"video_id": video_id, "html5": "1", "c": "TVHTML5", "cver": "7.20241026"}
+        resp = requests.get("https://www.youtube.com/get_video_info", params=params, timeout=15)
+        if "hlsManifestUrl" in resp.text:
+            hls = re.search(r"hlsManifestUrl=([^&]+)", resp.text)
+            if hls:
+                import urllib.parse
+                return urllib.parse.unquote(hls.group(1))
+        return None
+    except Exception:
+        return None
+
 def worker():
-    """Background thread that keeps a persistent Playwright browser open."""
+    """Persistent Playwright worker."""
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-gpu",
-                "--disable-dev-shm-usage",
-                "--disable-software-rasterizer",
-                "--disable-background-timer-throttling",
-                "--disable-renderer-backgrounding",
-            ],
+            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
         )
-
-        # ✅ Anti-bot, realistic desktop fingerprint
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                        "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -42,15 +60,9 @@ def worker():
             viewport={"width": 1366, "height": 768},
             locale="en-US",
             timezone_id="Asia/Kolkata",
-            java_script_enabled=True,
         )
-
-        # Hide automation fingerprints
         context.add_init_script("""
         Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-        Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3]});
-        Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
-        Object.defineProperty(navigator, 'platform', {get: () => 'Win32'});
         """)
 
         print("✅ Playwright worker started (browser persistent).")
@@ -59,41 +71,23 @@ def worker():
             job = job_queue.get()
             if job is None:
                 break
-
-            url, job_id = job
+            url, job_id, video_id = job
+            data = {}
             try:
-                page = context.new_page()
-
-                # Wait for full page + JS load
-                page.goto(url, wait_until="networkidle", timeout=120000)
-                time.sleep(3)
-
-                # Try direct JS evaluation first
-                js = page.evaluate("window.ytInitialPlayerResponse || null")
-
-                # Fallback: parse from HTML if blocked
-                if not js:
-                    html = page.content()
-                    match = re.search(r"ytInitialPlayerResponse\\s*=\\s*(\\{.*?\\})\\s*;", html)
-                    if match:
-                        try:
-                            js = json.loads(match.group(1))
-                        except Exception:
-                            js = None
-
-                page.close()
-
-                if not js:
-                    data = {"error": "ytInitialPlayerResponse not found (YouTube JS blocked or stripped)"}
+                js = extract_with_playwright(url, context)
+                if js:
+                    hls = js.get("streamingData", {}).get("hlsManifestUrl")
+                    if hls:
+                        data = {"hlsManifestUrl": hls}
+                    else:
+                        data = {"error": "No hlsManifestUrl found (not live/DVR)"}
                 else:
-                    streaming = js.get("streamingData", {})
-                    hls = streaming.get("hlsManifestUrl")
-                    data = (
-                        {"hlsManifestUrl": hls}
-                        if hls
-                        else {"error": "No hlsManifestUrl found (not live/DVR)"}
-                    )
-
+                    # 🔁 Fallback: use get_video_info API
+                    hls = fallback_get_info(video_id)
+                    if hls:
+                        data = {"hlsManifestUrl": hls, "source": "fallback_api"}
+                    else:
+                        data = {"error": "ytInitialPlayerResponse not found and fallback failed"}
             except Exception as e:
                 data = {"error": str(e)}
 
@@ -104,12 +98,8 @@ def worker():
         browser.close()
         print("🛑 Browser closed.")
 
-# Start persistent worker thread
 threading.Thread(target=worker, daemon=True).start()
 
-# ─────────────────────────────────────────────
-# ✅ API Route — accepts YouTube video ID (?id=)
-# ─────────────────────────────────────────────
 @app.route("/api/hls")
 def get_hls():
     video_id = request.args.get("id")
@@ -118,23 +108,17 @@ def get_hls():
 
     url = f"https://www.youtube.com/watch?v={video_id}"
     job_id = str(time.time())
-
-    job_queue.put((url, job_id))
+    job_queue.put((url, job_id, video_id))
     job_queue.join()
-
     return jsonify(result_dict.pop(job_id, {"error": "No result"}))
 
-# ─────────────────────────────────────────────
-# ✅ Root route
-# ─────────────────────────────────────────────
 @app.route("/")
 def home():
     return jsonify({
         "usage": "/api/hls?id=<YouTube_Video_ID>",
         "example": "/api/hls?id=5qap5aO4i9A",
-        "note": "Returns hlsManifestUrl for live/DVR streams (≤1080p).",
-        "optimized_for": "Render + Playwright stealth mode",
-        "fallback": "Parses HTML if JS blocked"
+        "note": "Tries Playwright first, falls back to YouTube API.",
+        "optimized_for": "Render headless environment"
     })
 
 if __name__ == "__main__":
