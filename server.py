@@ -5,9 +5,7 @@ import os, tempfile, atexit
 
 app = Flask(__name__)
 
-# ────────────────────────────────
-# ✅ Handle Cookies from Environment
-# ────────────────────────────────
+# Handle cookies
 cookiefile_path = None
 cookies_env = os.getenv("COOKIES")
 if cookies_env:
@@ -17,9 +15,6 @@ if cookies_env:
     cookiefile_path = tmp.name
     atexit.register(lambda: os.remove(cookiefile_path) if os.path.exists(cookiefile_path) else None)
 
-# ────────────────────────────────
-# ✅ Route: /api/hls?id=<video_id>
-# ────────────────────────────────
 @app.route("/api/hls")
 def get_hls():
     vid = request.args.get("id")
@@ -35,8 +30,6 @@ def get_hls():
         "geo_bypass": True,
         "extract_flat": False,
         "force_generic_extractor": False,
-
-        # 🔹 Pretend to be desktop Chrome (helps get 720p–1080p)
         "http_headers": {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -59,40 +52,47 @@ def get_hls():
             if not info:
                 return jsonify({"error": "Failed to extract info"}), 500
 
-            # 🔹 Collect all m3u8/native HLS formats
-            hls_formats = [
-                f for f in info.get("formats", [])
-                if "m3u8" in (f.get("protocol") or "") or "m3u8" in (f.get("url") or "")
+            formats = info.get("formats", [])
+            hls_variant = next((f for f in formats if "hls_variant" in (f.get("url") or "")), None)
+            hls_playlist = [
+                f for f in formats if "m3u8" in (f.get("protocol") or "") or "m3u8" in (f.get("url") or "")
             ]
 
-            if not hls_formats:
-                return jsonify({"error": "No HLS formats found (not live/DVR)"}), 404
+            # Prefer variant (multi-quality)
+            if hls_variant:
+                return jsonify({
+                    "auto_quality": True,
+                    "cookies_used": bool(cookiefile_path),
+                    "hlsManifestUrl": hls_variant["url"],
+                    "quality": "multi-quality",
+                    "title": info.get("title"),
+                    "uploader": info.get("uploader")
+                })
 
-            # 🔹 Sort formats by resolution height
-            hls_formats.sort(key=lambda f: f.get("height", 0), reverse=True)
-            best = hls_formats[0]
+            # Else fallback to best single-quality
+            if hls_playlist:
+                hls_playlist.sort(key=lambda f: f.get("height", 0), reverse=True)
+                best = hls_playlist[0]
+                return jsonify({
+                    "auto_quality": False,
+                    "cookies_used": bool(cookiefile_path),
+                    "hlsManifestUrl": best["url"],
+                    "quality": f"{best.get('height', '?')}p",
+                    "title": info.get("title"),
+                    "uploader": info.get("uploader")
+                })
 
-            return jsonify({
-                "hlsManifestUrl": best["url"],
-                "quality": f"{best.get('height', '?')}p",
-                "title": info.get("title"),
-                "uploader": info.get("uploader"),
-                "cookies_used": bool(cookiefile_path),
-                "auto_quality": True
-            })
+            return jsonify({"error": "No HLS found"}), 404
 
     except Exception as e:
         return jsonify({"error": str(e)})
 
-# ────────────────────────────────
-# ✅ Root route for info
-# ────────────────────────────────
 @app.route("/")
 def home():
     return jsonify({
         "usage": "/api/hls?id=<YouTube_Video_ID>",
         "example": "/api/hls?id=uXNU0XgGZhs",
-        "note": "Forces Chrome headers + cookies to get up to 1080p adaptive HLS."
+        "note": "Prefers adaptive HLS variant (auto-quality) if available."
     })
 
 if __name__ == "__main__":
