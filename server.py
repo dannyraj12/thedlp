@@ -1,8 +1,9 @@
 # pip install flask playwright playwright-stealth
 # playwright install chromium
+
 from flask import Flask, request, jsonify
 from playwright.sync_api import sync_playwright
-from playwright_stealth import stealth_sync
+from playwright_stealth import stealth
 import os, json, threading, queue, time, traceback, re
 
 app = Flask(__name__)
@@ -60,7 +61,7 @@ def worker():
             print(f"🔍 Processing: {url}")
             try:
                 page = context.new_page()
-                stealth_sync(page)  # 👈 makes Chromium undetectable
+                stealth(page)  # 👈 use stealth to hide headless fingerprinting
                 page.set_default_navigation_timeout(60000)
                 page.goto(url, wait_until="networkidle")
 
