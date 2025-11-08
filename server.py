@@ -1,103 +1,82 @@
 from flask import Flask, request, jsonify
-from yt_dlp import YoutubeDL
-import os, tempfile, re
+from playwright.sync_api import sync_playwright
+import os, tempfile, threading, queue, time
 
 app = Flask(__name__)
 
-@app.route("/api/m3u8")
-def get_m3u8():
-    video = request.args.get("url") or request.args.get("id")
-    if not video:
-        return jsonify({"error": "missing ?id= or ?url="}), 400
+# Queue for job requests (url -> result)
+job_queue = queue.Queue()
+result_dict = {}
 
-    # Normalize input
-    if "youtube.com" not in video and "youtu.be" not in video:
-        video = f"https://www.youtube.com/watch?v={video}"
+def worker():
+    """Background thread owning the Playwright browser."""
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-gpu",
+                "--disable-dev-shm-usage",
+                "--disable-software-rasterizer",
+                "--disable-background-timer-throttling",
+                "--disable-renderer-backgrounding",
+            ],
+        )
+        context = browser.new_context()
+        print("✅ Playwright worker started (browser persistent).")
+        while True:
+            job = job_queue.get()
+            if job is None:
+                break
+            url, job_id = job
+            try:
+                page = context.new_page()
+                page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                page.wait_for_function("window.ytInitialPlayerResponse !== undefined", timeout=15000)
+                js = page.evaluate("window.ytInitialPlayerResponse") or {}
+                page.close()
+                streaming = js.get("streamingData", {})
+                hls = streaming.get("hlsManifestUrl")
+                data = (
+                    {"hlsManifestUrl": hls}
+                    if hls
+                    else {"error": "No hlsManifestUrl found (not live/DVR)"}
+                )
+            except Exception as e:
+                data = {"error": str(e)}
+            result_dict[job_id] = data
+            job_queue.task_done()
+        context.close()
+        browser.close()
+        print("🛑 Browser closed.")
 
-    try:
-        # ✅ Optional cookies for restricted videos
-        cookies_env = os.getenv("COOKIES")
-        cookiefile = None
-        if cookies_env:
-            tmp = tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".txt")
-            cookies_text = cookies_env.replace("\\n", "\n").strip()
-            tmp.write(cookies_text)
-            tmp.close()
-            cookiefile = tmp.name
+# Start the worker thread once
+threading.Thread(target=worker, daemon=True).start()
 
-        # ✅ yt-dlp options – note: no “format=best” this time!
-        ydl_opts = {
-            "quiet": True,
-            "skip_download": True,
-            "cookiefile": cookiefile,
-            "ignoreerrors": True,
-            "no_warnings": True,
-            "extract_flat": False
-        }
+# ─────────────────────────────────────────────
+# ✅ Updated route — only accepts YouTube video ID (?id=)
+# ─────────────────────────────────────────────
+@app.route("/api/hls")
+def get_hls():
+    video_id = request.args.get("id")
+    if not video_id:
+        return jsonify({"error": "missing ?id="}), 400
 
-        with YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(video, download=False)
+    # Build full YouTube URL from the ID
+    url = f"https://www.youtube.com/watch?v={video_id}"
 
-        # ✅ Step 1: Try direct master HLS URL (YouTube sometimes puts it in "requested_formats")
-        master_url = None
-
-        # Some live/regular videos store the full HLS manifest link
-        if "url" in info and "playlist_type=HLS_MASTER" in info["url"]:
-            master_url = info["url"]
-
-        # ✅ Step 2: Search all formats for master playlist (playlist_type=HLS_MASTER)
-        if not master_url:
-            for f in info.get("formats", []):
-                u = f.get("url") or ""
-                if "manifest.googlevideo.com" in u and "playlist_type=HLS_MASTER" in u:
-                    master_url = u
-                    break
-
-        # ✅ Step 3: Try generic m3u8 URL containing "hls_playlist" if no master found
-        if not master_url:
-            for f in info.get("formats", []):
-                u = f.get("url") or ""
-                if "m3u8" in u and "hls_playlist" in u:
-                    master_url = u
-                    break
-
-        # ✅ Step 4: As last fallback, check "protocol": "m3u8_native"
-        if not master_url:
-            for f in info.get("formats", []):
-                if (f.get("protocol") or "") == "m3u8_native":
-                    master_url = f.get("url")
-                    break
-
-        if master_url:
-            # Strip any overly long signatures (optional cleanup)
-            master_url = re.sub(r"(&cnr=.*)$", "", master_url)
-
-            return jsonify({
-                "m3u8": master_url,
-                "title": info.get("title"),
-                "id": info.get("id"),
-                "uploader": info.get("uploader"),
-                "duration": info.get("duration"),
-                "type": "auto-quality HLS master"
-            })
-
-        return jsonify({
-            "error": "No auto-quality master .m3u8 found.",
-            "title": info.get("title")
-        })
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
+    job_id = str(time.time())
+    job_queue.put((url, job_id))
+    job_queue.join()  # wait for the worker to finish
+    return jsonify(result_dict.pop(job_id, {"error": "No result"}))
 
 @app.route("/")
 def home():
     return jsonify({
-        "usage": "/api/m3u8?id=VIDEO_ID or ?url=YOUTUBE_URL",
-        "example": "/api/m3u8?id=5qap5aO4i9A",
-        "note": "Returns true auto-quality HLS master playlist (.m3u8)"
+        "usage": "/api/hls?id=<YouTube_Video_ID>",
+        "example": "/api/hls?id=5qap5aO4i9A",
+        "note": "Returns hlsManifestUrl for live/DVR streams (≤1080 p)."
     })
-
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
