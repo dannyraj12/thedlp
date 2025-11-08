@@ -7,7 +7,12 @@ import logging
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 
+
 def write_cookies_from_env():
+    """
+    Read COOKIES env var (Netscape cookies.txt content),
+    write to a temporary file, and return its path.
+    """
     cookies_env = os.getenv("COOKIES")
     if not cookies_env:
         return None
@@ -15,11 +20,14 @@ def write_cookies_from_env():
     os.close(fd)
     with open(path, "w", encoding="utf-8") as f:
         f.write(cookies_env)
-    logging.info(f"Cookies written to {path}")
+    logging.info(f"🍪 Cookies written to temp file: {path}")
     return path
 
+
 def get_streams(video_id, cookiefile=None):
-    """Return both master (auto) and all quality playlists."""
+    """
+    Extract master (auto) and all quality HLS URLs using yt_dlp.
+    """
     youtube_url = f"https://www.youtube.com/watch?v={video_id}"
     ydl_opts = {
         "quiet": True,
@@ -46,20 +54,20 @@ def get_streams(video_id, cookiefile=None):
                 if not url or "m3u8" not in url:
                     continue
 
-                # Detect master (auto)
+                # Detect master playlist
                 if "hls_variant" in url or "/manifest/hls_variant" in url:
                     master = url
 
-                # Collect individual qualities
+                # Collect resolution-based playlists
                 elif "hls_playlist" in url:
                     qualities.append({
-                        "resolution": f.get("resolution") or f"{f.get('width','?')}x{f.get('height','?')}",
+                        "resolution": f.get("resolution")
+                            or f"{f.get('width','?')}x{f.get('height','?')}",
                         "fps": f.get("fps"),
                         "url": url
                     })
 
             if not master:
-                # fallback: choose any hls_variant if exists, else none
                 for f in formats:
                     url = f.get("url", "")
                     if "hls" in url:
@@ -81,10 +89,12 @@ def get_streams(video_id, cookiefile=None):
         msg = str(e)
         if "Sign in to confirm" in msg:
             return {
-                "error": "This stream requires login. Provide Netscape-format cookies in COOKIES env var.",
+                "error": ("YouTube requires authentication for this stream. "
+                          "Provide cookies in COOKIES env var (Netscape cookies.txt format)."),
                 "detail": msg
             }
         return {"error": msg}
+
 
 @app.route("/api/hls")
 def api_hls():
@@ -95,6 +105,7 @@ def api_hls():
     cookiefile = write_cookies_from_env()
     result = get_streams(video_id, cookiefile=cookiefile)
 
+    # cleanup
     if cookiefile and os.path.exists(cookiefile):
         try:
             os.remove(cookiefile)
@@ -103,13 +114,16 @@ def api_hls():
 
     return jsonify(result)
 
+
 @app.route("/")
 def home():
     return jsonify({
         "usage": "/api/hls?id=<YouTube_Video_ID>",
         "example": "/api/hls?id=fO9e9jnhYK8",
-        "note": "Returns both Auto Quality (master hls_variant) and all available quality m3u8s."
+        "note": ("Uses yt_dlp to return both Auto (hls_variant) and per-quality (hls_playlist) links. "
+                 "Supports COOKIES env var in Netscape cookies.txt format for restricted videos.")
     })
+
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8080))
