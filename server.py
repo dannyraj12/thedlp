@@ -1,6 +1,6 @@
 from flask import Flask, request, jsonify
 from yt_dlp import YoutubeDL
-import os, tempfile
+import os, tempfile, re
 
 app = Flask(__name__)
 
@@ -10,12 +10,12 @@ def get_m3u8():
     if not video:
         return jsonify({"error": "missing ?id= or ?url="}), 400
 
-    # Allow short YouTube IDs too
+    # Normalize input
     if "youtube.com" not in video and "youtu.be" not in video:
         video = f"https://www.youtube.com/watch?v={video}"
 
     try:
-        # ✅ Step 1: Write COOKIES env var into a real file (for login-restricted videos)
+        # ✅ Optional cookies for restricted videos
         cookies_env = os.getenv("COOKIES")
         cookiefile = None
         if cookies_env:
@@ -25,53 +25,64 @@ def get_m3u8():
             tmp.close()
             cookiefile = tmp.name
 
-        # ✅ Step 2: yt-dlp options
+        # ✅ yt-dlp options – note: no “format=best” this time!
         ydl_opts = {
             "quiet": True,
             "skip_download": True,
             "cookiefile": cookiefile,
-            "sleep_interval_requests": 1,
             "ignoreerrors": True,
             "no_warnings": True,
-            "format": "best",
             "extract_flat": False
         }
 
-        # ✅ Step 3: Extract info
         with YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(video, download=False)
 
-        # ✅ Step 4: Try to find the master (auto-quality) .m3u8 URL
-        hls_url = None
+        # ✅ Step 1: Try direct master HLS URL (YouTube sometimes puts it in "requested_formats")
+        master_url = None
 
-        # Sometimes yt-dlp sets it as info["url"]
-        if info.get("url") and "m3u8" in info["url"]:
-            hls_url = info["url"]
+        # Some live/regular videos store the full HLS manifest link
+        if "url" in info and "playlist_type=HLS_MASTER" in info["url"]:
+            master_url = info["url"]
 
-        # Otherwise, search through formats
-        if not hls_url:
+        # ✅ Step 2: Search all formats for master playlist (playlist_type=HLS_MASTER)
+        if not master_url:
             for f in info.get("formats", []):
-                url = f.get("url") or ""
-                protocol = f.get("protocol") or ""
-                if "m3u8" in protocol and "hls_playlist" in url:
-                    hls_url = url
+                u = f.get("url") or ""
+                if "manifest.googlevideo.com" in u and "playlist_type=HLS_MASTER" in u:
+                    master_url = u
                     break
-                # fallback to any m3u8 if above missing
-                elif "m3u8" in protocol and not hls_url:
-                    hls_url = url
 
-        if hls_url:
+        # ✅ Step 3: Try generic m3u8 URL containing "hls_playlist" if no master found
+        if not master_url:
+            for f in info.get("formats", []):
+                u = f.get("url") or ""
+                if "m3u8" in u and "hls_playlist" in u:
+                    master_url = u
+                    break
+
+        # ✅ Step 4: As last fallback, check "protocol": "m3u8_native"
+        if not master_url:
+            for f in info.get("formats", []):
+                if (f.get("protocol") or "") == "m3u8_native":
+                    master_url = f.get("url")
+                    break
+
+        if master_url:
+            # Strip any overly long signatures (optional cleanup)
+            master_url = re.sub(r"(&cnr=.*)$", "", master_url)
+
             return jsonify({
-                "m3u8": hls_url,
+                "m3u8": master_url,
                 "title": info.get("title"),
                 "id": info.get("id"),
                 "uploader": info.get("uploader"),
                 "duration": info.get("duration"),
-                "auto_quality": True
+                "type": "auto-quality HLS master"
             })
 
         return jsonify({
-            "error": "No auto-quality m3u8 found.",
+            "error": "No auto-quality master .m3u8 found.",
             "title": info.get("title")
         })
 
@@ -84,7 +95,7 @@ def home():
     return jsonify({
         "usage": "/api/m3u8?id=VIDEO_ID or ?url=YOUTUBE_URL",
         "example": "/api/m3u8?id=5qap5aO4i9A",
-        "note": "Returns auto-quality .m3u8 (144p–1080p+)"
+        "note": "Returns true auto-quality HLS master playlist (.m3u8)"
     })
 
 
