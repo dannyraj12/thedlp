@@ -3,7 +3,7 @@
 
 from flask import Flask, request, jsonify
 from playwright.sync_api import sync_playwright
-from playwright_stealth import Stealth  # ✅ new class-based import
+from playwright_stealth import Stealth  # ✅ latest API import
 import os, json, threading, queue, time, traceback, re
 
 app = Flask(__name__)
@@ -12,7 +12,7 @@ job_queue = queue.Queue()
 result_dict = {}
 
 def worker():
-    """Background worker that holds the persistent Playwright browser."""
+    """Background worker that holds a persistent Playwright browser."""
     with sync_playwright() as p:
         try:
             browser = p.chromium.launch(
@@ -28,9 +28,10 @@ def worker():
                 ],
             )
             context = browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                           "(KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-                viewport={"width":1280, "height":720}
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                           "AppleWebKit/537.36 (KHTML, like Gecko) "
+                           "Chrome/120.0 Safari/537.36",
+                viewport={"width": 1280, "height": 720}
             )
             print("✅ Chromium launched successfully.")
         except Exception as e:
@@ -47,35 +48,36 @@ def worker():
                 context.add_cookies(cookies)
                 print(f"🍪 Added {len(cookies)} cookies from environment.")
             except Exception as e:
-                print(f"⚠️ Failed to parse or add cookies: {e}")
+                print(f"⚠️ Failed to parse/add cookies: {e}")
         else:
             print("⚠️ No COOKIES environment variable found.")
 
         print("✅ Playwright worker started (browser persistent).")
 
-        stealth_tool = Stealth()  # ✅ instantiate the Stealth handler
-
         while True:
             job = job_queue.get()
             if job is None:
                 break
+
             url, job_id = job
             print(f"🔍 Processing: {url}")
+
             try:
                 page = context.new_page()
-                stealth_tool.apply_stealth(page)  # ✅ correct call
+                Stealth(page)  # ✅ new API automatically applies stealth
                 page.set_default_navigation_timeout(60000)
                 page.goto(url, wait_until="networkidle")
 
-                # Try to extract player response
+                # Try to extract ytInitialPlayerResponse
                 try:
                     js = page.evaluate("window.ytInitialPlayerResponse") or {}
-                except:
+                except Exception:
                     html = page.content()
                     match = re.search(r"ytInitialPlayerResponse\s*=\s*(\{.*?\})\s*;", html)
                     js = json.loads(match.group(1)) if match else {}
 
                 page.close()
+
                 streaming = js.get("streamingData", {})
                 hls = streaming.get("hlsManifestUrl")
 
@@ -84,6 +86,7 @@ def worker():
                     if hls
                     else {"error": "No hlsManifestUrl found (not live/DVR)", "stealth": True}
                 )
+
             except Exception as e:
                 err = traceback.format_exc(limit=1)
                 print("❌ Error extracting HLS:", err)
@@ -97,7 +100,7 @@ def worker():
         print("🛑 Browser closed. Worker stopped.")
 
 
-# Start the worker thread once
+# Start the background worker once
 threading.Thread(target=worker, daemon=True).start()
 
 
@@ -110,6 +113,7 @@ def get_hls():
     job_id = str(time.time())
     job_queue.put((url, job_id))
     job_queue.join()
+
     return jsonify(result_dict.pop(job_id, {"error": "No result"}))
 
 
