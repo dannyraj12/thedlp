@@ -1,21 +1,16 @@
 from flask import Flask, request, jsonify
 from playwright.sync_api import sync_playwright
 from playwright_stealth import stealth_sync
-import os, json, queue, threading, time, traceback, re
+import os, json, threading, queue, time, re, traceback
 
 app = Flask(__name__)
 
-# globals created lazily
-p = browser = context = None
-lock = threading.Lock()
+job_queue = queue.Queue()
+results = {}
 
-def ensure_browser():
-    """Start browser only once, when first needed."""
-    global p, browser, context
-    with lock:
-        if browser:
-            return context
-        p = sync_playwright().start()
+def worker():
+    """Background thread that owns the Playwright browser forever."""
+    with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
             args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"]
@@ -26,6 +21,7 @@ def ensure_browser():
                         " Chrome/120.0 Safari/537.36")
         )
 
+        # load cookies once
         cookies_json = os.getenv("COOKIES")
         if cookies_json:
             try:
@@ -33,43 +29,63 @@ def ensure_browser():
                 for c in cookies:
                     c.setdefault("sameSite", "None")
                 context.add_cookies(cookies)
-                print(f"🍪 Added {len(cookies)} cookies")
+                print(f"🍪 Loaded {len(cookies)} cookies.")
             except Exception as e:
-                print("⚠️ Cookie load error:", e)
-        else:
-            print("⚠️ No COOKIES env found.")
-        return context
+                print("⚠️ Cookie error:", e)
+
+        print("✅ Browser worker ready.")
+
+        while True:
+            job = job_queue.get()
+            if job is None:
+                break
+            url, job_id = job
+            print(f"🔍 Processing {url}")
+            try:
+                page = context.new_page()
+                stealth_sync(page)
+                page.goto(url, wait_until="networkidle", timeout=60000)
+
+                try:
+                    js = page.evaluate("window.ytInitialPlayerResponse") or {}
+                except Exception:
+                    html = page.content()
+                    m = re.search(r"ytInitialPlayerResponse\s*=\s*(\{.*?\})\s*;", html)
+                    js = json.loads(m.group(1)) if m else {}
+
+                page.close()
+                streaming = js.get("streamingData", {})
+                hls = streaming.get("hlsManifestUrl")
+                data = (
+                    {"hlsManifestUrl": hls, "stealth": True}
+                    if hls else {"error": "No hlsManifestUrl found", "stealth": True}
+                )
+            except Exception as e:
+                print("❌ Job error:", e)
+                traceback.print_exc()
+                data = {"error": str(e), "stealth": True}
+
+            results[job_id] = data
+            job_queue.task_done()
+
+        browser.close()
+        print("🛑 Browser closed.")
+
+
+# start worker thread at startup
+threading.Thread(target=worker, daemon=True).start()
 
 
 @app.route("/api/hls")
-def get_hls():
+def api_hls():
     url = request.args.get("url")
     if not url:
         return jsonify({"error": "missing ?url="}), 400
 
-    ctx = ensure_browser()
-    try:
-        page = ctx.new_page()
-        stealth_sync(page)
-        page.goto(url, wait_until="networkidle", timeout=60000)
-
-        try:
-            js = page.evaluate("window.ytInitialPlayerResponse") or {}
-        except Exception:
-            html = page.content()
-            match = re.search(r"ytInitialPlayerResponse\s*=\s*(\{.*?\})\s*;", html)
-            js = json.loads(match.group(1)) if match else {}
-
-        page.close()
-        streaming = js.get("streamingData", {})
-        hls = streaming.get("hlsManifestUrl")
-        return jsonify(
-            {"hlsManifestUrl": hls, "stealth": True}
-            if hls else {"error": "No hlsManifestUrl found", "stealth": True}
-        )
-    except Exception as e:
-        traceback.print_exc()
-        return jsonify({"error": str(e), "stealth": True})
+    job_id = str(time.time())
+    job_queue.put((url, job_id))
+    job_queue.join()
+    return jsonify(results.pop(job_id, {"error": "No result"}))
 
 
 @app.route("/")
@@ -77,7 +93,7 @@ def home():
     return jsonify({
         "usage": "/api/hls?url=<YouTube_URL>",
         "example": "/api/hls?url=https://www.youtube.com/watch?v=5qap5aO4i9A",
-        "note": "Lazy-launch Playwright + Stealth (stable on Render)."
+        "note": "Thread-safe Playwright worker. Fixes 'cannot switch to a different thread'."
     })
 
 
