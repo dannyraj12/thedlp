@@ -4,95 +4,89 @@ from playwright.sync_api import sync_playwright
 import os, threading, queue, time, json, subprocess
 
 app = Flask(__name__)
-
-# ───────────────────────────────
-# 🧠 Auto-install Chromium at runtime if missing
-# ───────────────────────────────
-try:
-    chromium_path = "/opt/render/.cache/ms-playwright"
-    if not os.path.exists(chromium_path):
-        os.makedirs(chromium_path, exist_ok=True)
-    if not any("chromium" in f for f in os.listdir(chromium_path)):
-        print("⚙️ Installing Chromium (first run)...")
-        subprocess.run(["python", "-m", "playwright", "install", "chromium"], check=True)
-except Exception as e:
-    print(f"⚠️ Browser auto-install skipped: {e}")
-
-# ───────────────────────────────
-# Queue setup
-# ───────────────────────────────
 job_queue = queue.Queue()
 result_dict = {}
 
+def ensure_chromium():
+    """Ensure Playwright Chromium exists before launching."""
+    try:
+        subprocess.run(
+            ["python", "-m", "playwright", "install", "chromium"],
+            check=True,
+        )
+        print("✅ Chromium verified/installed.")
+    except Exception as e:
+        print(f"⚠️ Chromium install failed: {e}")
+
 def worker():
-    """Persistent Playwright browser with YouTube cookie support."""
+    """Persistent browser worker."""
     with sync_playwright() as p:
+        print("🚀 Launching Chromium...")
         browser = p.chromium.launch(
             headless=True,
             args=[
-                "--no-sandbox",
-                "--disable-gpu",
-                "--disable-dev-shm-usage",
-                "--disable-software-rasterizer",
-                "--disable-background-timer-throttling",
-                "--disable-renderer-backgrounding",
+                "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
+                "--disable-software-rasterizer", "--disable-blink-features=AutomationControlled"
             ],
         )
 
-        # ✅ load cookies from env if available
+        # cookies
         cookies_raw = os.getenv("COOKIES", "")
         cookies = []
         if cookies_raw.strip():
             try:
                 cookies = json.loads(cookies_raw)
-                print(f"🍪 Loaded {len(cookies)} cookies from environment.")
+                print(f"🍪 Loaded {len(cookies)} cookies.")
             except Exception as e:
-                print(f"⚠️ Failed to parse cookies JSON: {e}")
+                print(f"⚠️ Cookie JSON parse error: {e}")
 
-        context = browser.new_context()
+        context = browser.new_context(
+            viewport={"width": 1366, "height": 768},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/119.0.0.0 Safari/537.36"
+        )
+
         if cookies:
             try:
                 context.add_cookies(cookies)
-                print("✅ Cookies added to context.")
+                print("✅ Cookies added to browser context.")
             except Exception as e:
-                print(f"⚠️ Could not add cookies: {e}")
+                print(f"⚠️ Cookie injection failed: {e}")
 
-        print("✅ Playwright worker started (browser persistent).")
+        print("✅ Browser worker ready.")
 
         while True:
             job = job_queue.get()
             if job is None:
                 break
             url, job_id = job
-            data = {}
+            print(f"🌐 Processing {url}")
+            result = {}
             try:
                 page = context.new_page()
-                print(f"🌐 Opening {url}")
-                page.goto(url, wait_until="domcontentloaded", timeout=45000)
-
-                # wait up to 60 s for ytInitialPlayerResponse
-                page.wait_for_function("window.ytInitialPlayerResponse !== undefined", timeout=60000)
-
-                js = page.evaluate("window.ytInitialPlayerResponse") or {}
-                streaming = js.get("streamingData", {})
-                hls = streaming.get("hlsManifestUrl")
-                if hls:
-                    data = {"hlsManifestUrl": hls, "cookies_used": bool(cookies)}
-                else:
-                    data = {"error": "No hlsManifestUrl found (not live/DVR)"}
+                page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                page.add_init_script("""
+                    Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                    window.chrome = { runtime: {} };
+                    Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3]});
+                    Object.defineProperty(navigator, 'languages', {get: () => ['en-US','en']});
+                """)
+                page.wait_for_function("window.ytInitialPlayerResponse !== undefined", timeout=75000)
+                js = page.evaluate("window.ytInitialPlayerResponse")
+                hls = js.get("streamingData", {}).get("hlsManifestUrl")
+                result = (
+                    {"hlsManifestUrl": hls, "cookies_used": bool(cookies), "auto_quality": True}
+                    if hls else {"error": "no hlsManifestUrl (not live)"}
+                )
                 page.close()
             except Exception as e:
-                data = {"error": str(e)}
-            result_dict[job_id] = data
+                result = {"error": str(e)}
+            result_dict[job_id] = result
             job_queue.task_done()
 
         context.close()
         browser.close()
-        print("🛑 Browser closed.")
-
-
-# start background worker
-threading.Thread(target=worker, daemon=True).start()
 
 @app.route("/api/hls")
 def get_hls():
@@ -107,11 +101,9 @@ def get_hls():
 
 @app.route("/")
 def home():
-    return jsonify({
-        "usage": "/api/hls?id=<YouTube_Video_ID>",
-        "example": "/api/hls?id=uXNU0XgGZhs",
-        "note": "Uses Playwright + cookies + 60 s timeout for HLS manifest."
-    })
+    return jsonify({"usage": "/api/hls?id=<id>", "note": "Playwright + cookies"})
 
 if __name__ == "__main__":
+    ensure_chromium()
+    threading.Thread(target=worker, daemon=True).start()
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
