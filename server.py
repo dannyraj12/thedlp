@@ -1,8 +1,15 @@
 # pip install flask playwright
 # playwright install chromium
+
 from flask import Flask, request, jsonify
 from playwright.sync_api import sync_playwright
-import os, threading, queue, time
+import os, threading, queue, time, subprocess
+
+# ─────────────────────────────────────────────
+# ✅ Ensure Chromium installs at runtime (Render resets /tmp)
+# ─────────────────────────────────────────────
+os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "/tmp/playwright"
+subprocess.run(["playwright", "install", "chromium"], check=False)
 
 app = Flask(__name__)
 
@@ -11,7 +18,7 @@ job_queue = queue.Queue()
 result_dict = {}
 
 def worker():
-    """Background thread owning the Playwright browser."""
+    """Background thread owning the Playwright browser (persistent)."""
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
@@ -30,15 +37,16 @@ def worker():
             job = job_queue.get()
             if job is None:
                 break
+
             url, job_id = job
             try:
                 page = context.new_page()
 
-                # ⏳ Allow very slow loads: 2-minute timeout total
+                # Allow up to 2 minutes (slow free-tier CPU, YouTube loads)
                 page.goto(url, wait_until="load", timeout=120000)
                 page.wait_for_function(
                     "window.ytInitialPlayerResponse !== undefined",
-                    timeout=120000
+                    timeout=120000,
                 )
 
                 js = page.evaluate("window.ytInitialPlayerResponse") or {}
@@ -52,13 +60,15 @@ def worker():
                 )
             except Exception as e:
                 data = {"error": str(e)}
+
             result_dict[job_id] = data
             job_queue.task_done()
+
         context.close()
         browser.close()
         print("🛑 Browser closed.")
 
-# Start the worker thread once
+# Start Playwright worker thread once (browser stays persistent)
 threading.Thread(target=worker, daemon=True).start()
 
 @app.route("/api/hls")
@@ -69,7 +79,7 @@ def get_hls():
 
     job_id = str(time.time())
     job_queue.put((url, job_id))
-    job_queue.join()  # wait for the worker to finish
+    job_queue.join()  # Wait for job to complete
     return jsonify(result_dict.pop(job_id, {"error": "No result"}))
 
 @app.route("/")
@@ -77,8 +87,9 @@ def home():
     return jsonify({
         "usage": "/api/hls?url=<YouTube_URL>",
         "example": "/api/hls?url=https://www.youtube.com/watch?v=5qap5aO4i9A",
-        "note": "Returns hlsManifestUrl for live/DVR streams (≤1080 p).",
-        "timeout": "2 minutes total wait per request"
+        "note": "Extracts hlsManifestUrl for live/DVR streams (≤1080p).",
+        "auto_runtime_setup": True,
+        "timeout": "2 minutes max wait per request"
     })
 
 if __name__ == "__main__":
