@@ -3,7 +3,7 @@
 
 from flask import Flask, request, jsonify
 from playwright.sync_api import sync_playwright
-from playwright_stealth import stealth
+from playwright_stealth.stealth import stealth  # ✅ Correct import
 import os, json, threading, queue, time, traceback, re
 
 app = Flask(__name__)
@@ -61,11 +61,11 @@ def worker():
             print(f"🔍 Processing: {url}")
             try:
                 page = context.new_page()
-                stealth(page)  # 👈 use stealth to hide headless fingerprinting
+                stealth(page)  # ✅ Proper stealth usage
                 page.set_default_navigation_timeout(60000)
                 page.goto(url, wait_until="networkidle")
 
-                # Try to get player response
+                # Try to extract player response
                 try:
                     js = page.evaluate("window.ytInitialPlayerResponse") or {}
                 except:
