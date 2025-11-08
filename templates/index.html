@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YouTube Live to M3U8 Grabber</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <h1>🎥 YouTube Live M3U8 Grabber</h1>
+        <p class="subtitle">Extract m3u8 playlist links from YouTube live streams with auto quality selection</p>
+        
+        <div class="info-box">
+            <h3>ℹ️ How to Use</h3>
+            <ol>
+                <li>Find a <strong>currently LIVE</strong> YouTube stream (look for the red "LIVE" badge)</li>
+                <li>Copy the stream URL (e.g., youtube.com/watch?v=xxxxx)</li>
+                <li>Paste it below and click "Extract M3U8"</li>
+                <li>Copy the m3u8 URL and use it in your media player</li>
+            </ol>
+            <p class="note"><strong>Note:</strong> M3U8 URLs expire after 6-24 hours. Only works with currently live streams, not past or upcoming streams.</p>
+        </div>
+        
+        <div class="input-section">
+            <input type="text" id="youtubeUrl" placeholder="Paste YouTube live stream URL here..." />
+            <button id="extractBtn">Extract M3U8</button>
+        </div>
+        
+        <div class="examples">
+            <p class="examples-title">💡 Where to find live streams:</p>
+            <div class="example-links">
+                <span>Search YouTube for:</span>
+                <a href="https://www.youtube.com/results?search_query=24%2F7+live+stream&sp=EgJAAQ%253D%253D" target="_blank">24/7 Streams</a>
+                <a href="https://www.youtube.com/results?search_query=live+news&sp=EgJAAQ%253D%253D" target="_blank">Live News</a>
+                <a href="https://www.youtube.com/results?search_query=space+live+stream&sp=EgJAAQ%253D%253D" target="_blank">Space Streams</a>
+            </div>
+        </div>
+        
+        <div id="loading" class="loading" style="display: none;">
+            <div class="spinner"></div>
+            <p>Extracting m3u8 links...</p>
+        </div>
+        
+        <div id="error" class="error" style="display: none;"></div>
+        
+        <div id="result" class="result" style="display: none;">
+            <div class="video-info">
+                <img id="thumbnail" src="" alt="Thumbnail" />
+                <div class="info-text">
+                    <h2 id="title"></h2>
+                    <p id="uploader"></p>
+                    <p id="liveStatus"></p>
+                </div>
+            </div>
+            
+            <div class="auto-quality">
+                <h3>🎯 Auto Quality (Best)</h3>
+                <div class="url-box">
+                    <input type="text" id="autoUrl" readonly />
+                    <button class="copy-btn" onclick="copyToClipboard('autoUrl')">Copy</button>
+                </div>
+            </div>
+            
+            <div id="formatsList" class="formats-list">
+                <h3>📊 Available Qualities</h3>
+                <div id="formats"></div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        const extractBtn = document.getElementById('extractBtn');
+        const youtubeUrl = document.getElementById('youtubeUrl');
+        const loading = document.getElementById('loading');
+        const error = document.getElementById('error');
+        const result = document.getElementById('result');
+        
+        extractBtn.addEventListener('click', extractM3U8);
+        youtubeUrl.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') extractM3U8();
+        });
+        
+        async function extractM3U8() {
+            const url = youtubeUrl.value.trim();
+            
+            if (!url) {
+                showError('Please enter a YouTube URL');
+                return;
+            }
+            
+            loading.style.display = 'block';
+            error.style.display = 'none';
+            result.style.display = 'none';
+            
+            try {
+                const response = await fetch('/extract', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ url: url })
+                });
+                
+                const data = await response.json();
+                
+                loading.style.display = 'none';
+                
+                if (data.error) {
+                    showError(data.error);
+                    return;
+                }
+                
+                displayResult(data);
+                
+            } catch (err) {
+                loading.style.display = 'none';
+                showError('Failed to extract m3u8 links: ' + err.message);
+            }
+        }
+        
+        function displayResult(data) {
+            document.getElementById('thumbnail').src = data.thumbnail;
+            document.getElementById('title').textContent = data.title;
+            document.getElementById('uploader').textContent = 'Channel: ' + data.uploader;
+            document.getElementById('liveStatus').innerHTML = data.is_live 
+                ? '<span class="live-badge">🔴 LIVE</span>' 
+                : '<span class="not-live">Not currently live</span>';
+            
+            document.getElementById('autoUrl').value = data.auto_quality_url || 'Not available';
+            
+            const formatsDiv = document.getElementById('formats');
+            formatsDiv.innerHTML = '';
+            
+            if (data.formats && data.formats.length > 0) {
+                data.formats.forEach((fmt, index) => {
+                    const formatDiv = document.createElement('div');
+                    formatDiv.className = 'format-item';
+                    formatDiv.innerHTML = `
+                        <div class="format-info">
+                            <span class="quality-badge">${fmt.quality}</span>
+                            <span class="resolution">${fmt.resolution}</span>
+                            ${fmt.fps !== 'N/A' ? `<span class="fps">${fmt.fps}fps</span>` : ''}
+                        </div>
+                        <div class="url-box">
+                            <input type="text" id="url-${index}" value="${fmt.url}" readonly />
+                            <button class="copy-btn" onclick="copyToClipboard('url-${index}')">Copy</button>
+                        </div>
+                    `;
+                    formatsDiv.appendChild(formatDiv);
+                });
+            } else {
+                formatsDiv.innerHTML = '<p>No m3u8 formats found. The video might not be a live stream.</p>';
+            }
+            
+            result.style.display = 'block';
+        }
+        
+        function showError(message) {
+            error.textContent = message;
+            error.style.display = 'block';
+        }
+        
+        function copyToClipboard(elementId) {
+            const input = document.getElementById(elementId);
+            input.select();
+            document.execCommand('copy');
+            
+            const btn = input.nextElementSibling;
+            const originalText = btn.textContent;
+            btn.textContent = 'Copied!';
+            btn.classList.add('copied');
+            
+            setTimeout(() => {
+                btn.textContent = originalText;
+                btn.classList.remove('copied');
+            }, 2000);
+        }
+    </script>
+</body>
+</html>
