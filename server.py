@@ -1,6 +1,15 @@
+# pip install flask playwright
+# playwright install chromium
+
+import subprocess, os
+# Force Playwright to use a writable path for browsers (Render-safe)
+os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "/tmp/playwright"
+# Auto-install Chromium if missing (safe & idempotent)
+subprocess.run(["playwright", "install", "chromium"], check=False)
+
 from flask import Flask, request, jsonify
 from playwright.sync_api import sync_playwright
-import os, tempfile, threading, queue, time
+import tempfile, threading, queue, time
 
 app = Flask(__name__)
 
