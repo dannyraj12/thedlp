@@ -22,7 +22,7 @@ def extract_video_id(url):
 
 def get_m3u8_links(youtube_url):
     try:
-        # ✅ Balanced yt_dlp options for stable live extraction
+        # ✅ Modern yt_dlp options (Nov 2025 YouTube API support)
         ydl_opts = {
             'quiet': True,
             'no_warnings': True,
@@ -39,7 +39,9 @@ def get_m3u8_links(youtube_url):
             },
             'extractor_args': {
                 'youtube': {
-                    'player_client': ['web_embedded', 'android'],
+                    # 👇 Correct modern fallback order for live m3u8 extraction
+                    'player_client': ['web', 'ios', 'android'],
+                    'player_skip': ['webpage'],
                 }
             },
         }
@@ -52,19 +54,24 @@ def get_m3u8_links(youtube_url):
                 f.write(cookies_env)
             ydl_opts["cookiefile"] = temp_cookie_path
 
-        # 🔹 Attempt 1 — normal extraction
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(youtube_url, download=False)
-
-        # 🔁 Fallback — try iOS or web if the first failed
-        if not info or 'formats' not in info or not info.get('formats'):
-            logging.warning("Retrying with fallback YouTube client (web)...")
-            ydl_opts['extractor_args']['youtube']['player_client'] = ['web']
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl2:
-                info = ydl2.extract_info(youtube_url, download=False)
+        # 🔹 Try extraction with modern clients (web → ios → android fallback)
+        info = None
+        clients = ['web', 'ios', 'android']
+        for client in clients:
+            try:
+                ydl_opts['extractor_args']['youtube']['player_client'] = [client]
+                logging.info(f"Trying YouTube player client: {client}")
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(youtube_url, download=False)
+                if info and info.get('formats'):
+                    logging.info(f"Extraction successful using client: {client}")
+                    break
+            except yt_dlp.utils.DownloadError as e:
+                logging.warning(f"Client {client} failed: {e}")
+                continue
 
         if not info:
-            return {'error': 'Could not extract video information. Please check the URL and try again.'}
+            return {'error': 'Could not extract video information. Please check the URL or try again later.'}
         
         is_live = info.get('is_live', False)
         was_live = info.get('was_live', False)
@@ -168,6 +175,8 @@ def get_m3u8_links(youtube_url):
             return {'error': 'This video is unavailable. It may have been removed or made private.'}
         elif 'not a live stream' in error_str.lower():
             return {'error': 'This is not a live stream. This tool only works with currently live YouTube streams.'}
+        elif 'Error 153' in error_str:
+            return {'error': 'YouTube returned Error 153 (player config error). Try again with updated cookies or after refreshing the live stream.'}
         else:
             return {'error': 'Unable to extract video information. Please check the URL and try again.'}
     except Exception as e:
