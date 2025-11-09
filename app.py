@@ -19,12 +19,29 @@ def extract_video_id(url):
             return match.group(1)
     return None
 
+
 def get_m3u8_links(youtube_url):
     try:
+        # ✅ Improved yt_dlp options for more reliable live stream extraction
         ydl_opts = {
             'quiet': True,
             'no_warnings': True,
             'extract_flat': False,
+            'noplaylist': True,
+            'geo_bypass': True,
+            'source_address': '0.0.0.0',
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Referer': 'https://www.youtube.com/',
+                'Origin': 'https://www.youtube.com',
+            },
+            'extractor_args': {
+                'youtube': {
+                    'player_skip': ['webpage'],
+                    'player_client': ['android', 'tv', 'ios'],  # tries multiple client types
+                }
+            },
         }
 
         # ✅ Auto-load Netscape cookies from env variable COOKIES if available
@@ -37,7 +54,14 @@ def get_m3u8_links(youtube_url):
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(youtube_url, download=False)
-            
+
+            # 🔁 Fallback: retry with iOS client if nothing extracted
+            if not info or 'formats' not in info or not info.get('formats'):
+                logging.warning("Retrying with iOS player client...")
+                ydl_opts['extractor_args']['youtube']['player_client'] = ['ios']
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl2:
+                    info = ydl2.extract_info(youtube_url, download=False)
+
             if not info:
                 return {'error': 'Could not extract video information. Please check the URL and try again.'}
             
@@ -149,9 +173,11 @@ def get_m3u8_links(youtube_url):
         logging.error(f"Unexpected error: {str(e)}")
         return {'error': 'An unexpected error occurred. Please check the URL and try again.'}
 
+
 @app.route('/')
 def index():
     return render_template('index.html')
+
 
 @app.route('/extract', methods=['POST'])
 def extract():
@@ -167,6 +193,7 @@ def extract():
     
     result = get_m3u8_links(youtube_url)
     return jsonify(result)
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=False)
