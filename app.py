@@ -22,7 +22,7 @@ def extract_video_id(url):
 
 def get_m3u8_links(youtube_url):
     try:
-        # ✅ Improved yt_dlp options for more reliable live stream extraction
+        # ✅ Balanced yt_dlp options for stable live extraction
         ydl_opts = {
             'quiet': True,
             'no_warnings': True,
@@ -30,6 +30,7 @@ def get_m3u8_links(youtube_url):
             'noplaylist': True,
             'geo_bypass': True,
             'source_address': '0.0.0.0',
+            'force_generic_extractor': False,
             'http_headers': {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
                 'Accept-Language': 'en-US,en;q=0.9',
@@ -38,8 +39,7 @@ def get_m3u8_links(youtube_url):
             },
             'extractor_args': {
                 'youtube': {
-                    'player_skip': ['webpage'],
-                    'player_client': ['android', 'tv', 'ios'],  # tries multiple client types
+                    'player_client': ['web_embedded', 'android'],
                 }
             },
         }
@@ -52,111 +52,112 @@ def get_m3u8_links(youtube_url):
                 f.write(cookies_env)
             ydl_opts["cookiefile"] = temp_cookie_path
 
+        # 🔹 Attempt 1 — normal extraction
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(youtube_url, download=False)
 
-            # 🔁 Fallback: retry with iOS client if nothing extracted
-            if not info or 'formats' not in info or not info.get('formats'):
-                logging.warning("Retrying with iOS player client...")
-                ydl_opts['extractor_args']['youtube']['player_client'] = ['ios']
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl2:
-                    info = ydl2.extract_info(youtube_url, download=False)
+        # 🔁 Fallback — try iOS or web if the first failed
+        if not info or 'formats' not in info or not info.get('formats'):
+            logging.warning("Retrying with fallback YouTube client (web)...")
+            ydl_opts['extractor_args']['youtube']['player_client'] = ['web']
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl2:
+                info = ydl2.extract_info(youtube_url, download=False)
 
-            if not info:
-                return {'error': 'Could not extract video information. Please check the URL and try again.'}
+        if not info:
+            return {'error': 'Could not extract video information. Please check the URL and try again.'}
+        
+        is_live = info.get('is_live', False)
+        was_live = info.get('was_live', False)
+        
+        if was_live and not is_live:
+            return {'error': 'This stream has ended. M3U8 links are only available for currently live streams.'}
+        
+        if not is_live and not was_live:
+            live_status = info.get('live_status', '')
+            if live_status == 'is_upcoming':
+                return {'error': 'This stream has not started yet. M3U8 links will be available once the stream goes live.'}
+            elif live_status == 'not_live':
+                return {'error': 'This is not a live stream. This tool only works with YouTube live streams.'}
+        
+        logging.info(f"Processing video: {info.get('title')} - Live: {is_live}")
+        logging.info(f"Total formats available: {len(info.get('formats', []))}")
+        
+        m3u8_formats = []
+        
+        for fmt in info.get('formats', []):
+            url = fmt.get('url', '')
+            protocol = fmt.get('protocol', '')
             
-            is_live = info.get('is_live', False)
-            was_live = info.get('was_live', False)
-            
-            if was_live and not is_live:
-                return {'error': 'This stream has ended. M3U8 links are only available for currently live streams.'}
-            
-            if not is_live and not was_live:
-                live_status = info.get('live_status', '')
-                if live_status == 'is_upcoming':
-                    return {'error': 'This stream has not started yet. M3U8 links will be available once the stream goes live.'}
-                elif live_status == 'not_live':
-                    return {'error': 'This is not a live stream. This tool only works with YouTube live streams.'}
-            
-            logging.info(f"Processing video: {info.get('title')} - Live: {is_live}")
-            logging.info(f"Total formats available: {len(info.get('formats', []))}")
-            
-            m3u8_formats = []
-            
-            for fmt in info.get('formats', []):
-                url = fmt.get('url', '')
-                protocol = fmt.get('protocol', '')
+            if protocol == 'm3u8_native' or protocol == 'm3u8' or '.m3u8' in url:
+                vcodec = fmt.get('vcodec', 'none')
+                acodec = fmt.get('acodec', 'none')
                 
-                if protocol == 'm3u8_native' or protocol == 'm3u8' or '.m3u8' in url:
-                    vcodec = fmt.get('vcodec', 'none')
-                    acodec = fmt.get('acodec', 'none')
-                    
-                    is_audio_only = vcodec == 'none' and acodec != 'none'
-                    
-                    quality = fmt.get('format_note', 'unknown')
-                    resolution = fmt.get('resolution', 'N/A')
-                    fps = fmt.get('fps', 'N/A')
-                    format_id = fmt.get('format_id', '')
-                    tbr = fmt.get('tbr', 0)
-                    height = fmt.get('height', 0)
-                    width = fmt.get('width', 0)
-                    
-                    m3u8_formats.append({
-                        'url': url,
-                        'quality': quality,
-                        'resolution': resolution,
-                        'fps': fps,
-                        'format_id': format_id,
-                        'tbr': tbr or 0,
-                        'height': height or 0,
-                        'width': width or 0,
-                        'is_audio_only': is_audio_only
-                    })
-            
-            logging.info(f"Found {len(m3u8_formats)} m3u8 formats")
-            
-            video_formats = [f for f in m3u8_formats if not f['is_audio_only']]
-            
-            if video_formats:
-                video_formats.sort(key=lambda x: (x['height'], x['width'], x['tbr']), reverse=True)
-                logging.info(f"Found {len(video_formats)} video formats (excluding audio-only)")
-            
-            manifest_url = info.get('manifest_url')
-            best_m3u8 = None
-            
-            if manifest_url and '.m3u8' in manifest_url:
-                best_m3u8 = manifest_url
-                logging.info(f"Using manifest_url as best quality")
-            elif video_formats:
-                best_m3u8 = video_formats[0]['url']
-                logging.info(f"Using top video format: {video_formats[0]['quality']} - {video_formats[0]['resolution']}")
-            elif m3u8_formats:
-                best_m3u8 = m3u8_formats[0]['url']
-                logging.info(f"Using first m3u8 format (possibly audio-only)")
-            else:
-                logging.warning("No m3u8 formats found!")
-            
-            logging.info(f"Best m3u8 URL length: {len(best_m3u8) if best_m3u8 else 0}")
-            
-            formats_for_display = [
-                {
-                    'url': f['url'],
-                    'quality': f['quality'] + (' (audio only)' if f['is_audio_only'] else ''),
-                    'resolution': f['resolution'],
-                    'fps': f['fps'],
-                    'format_id': f['format_id']
-                }
-                for f in m3u8_formats
-            ]
-            
-            return {
-                'title': info.get('title', 'Unknown'),
-                'is_live': is_live,
-                'thumbnail': info.get('thumbnail', ''),
-                'formats': formats_for_display,
-                'auto_quality_url': best_m3u8,
-                'uploader': info.get('uploader', 'Unknown')
+                is_audio_only = vcodec == 'none' and acodec != 'none'
+                
+                quality = fmt.get('format_note', 'unknown')
+                resolution = fmt.get('resolution', 'N/A')
+                fps = fmt.get('fps', 'N/A')
+                format_id = fmt.get('format_id', '')
+                tbr = fmt.get('tbr', 0)
+                height = fmt.get('height', 0)
+                width = fmt.get('width', 0)
+                
+                m3u8_formats.append({
+                    'url': url,
+                    'quality': quality,
+                    'resolution': resolution,
+                    'fps': fps,
+                    'format_id': format_id,
+                    'tbr': tbr or 0,
+                    'height': height or 0,
+                    'width': width or 0,
+                    'is_audio_only': is_audio_only
+                })
+        
+        logging.info(f"Found {len(m3u8_formats)} m3u8 formats")
+        
+        video_formats = [f for f in m3u8_formats if not f['is_audio_only']]
+        
+        if video_formats:
+            video_formats.sort(key=lambda x: (x['height'], x['width'], x['tbr']), reverse=True)
+            logging.info(f"Found {len(video_formats)} video formats (excluding audio-only)")
+        
+        manifest_url = info.get('manifest_url')
+        best_m3u8 = None
+        
+        if manifest_url and '.m3u8' in manifest_url:
+            best_m3u8 = manifest_url
+            logging.info(f"Using manifest_url as best quality")
+        elif video_formats:
+            best_m3u8 = video_formats[0]['url']
+            logging.info(f"Using top video format: {video_formats[0]['quality']} - {video_formats[0]['resolution']}")
+        elif m3u8_formats:
+            best_m3u8 = m3u8_formats[0]['url']
+            logging.info(f"Using first m3u8 format (possibly audio-only)")
+        else:
+            logging.warning("No m3u8 formats found!")
+        
+        logging.info(f"Best m3u8 URL length: {len(best_m3u8) if best_m3u8 else 0}")
+        
+        formats_for_display = [
+            {
+                'url': f['url'],
+                'quality': f['quality'] + (' (audio only)' if f['is_audio_only'] else ''),
+                'resolution': f['resolution'],
+                'fps': f['fps'],
+                'format_id': f['format_id']
             }
+            for f in m3u8_formats
+        ]
+        
+        return {
+            'title': info.get('title', 'Unknown'),
+            'is_live': is_live,
+            'thumbnail': info.get('thumbnail', ''),
+            'formats': formats_for_display,
+            'auto_quality_url': best_m3u8,
+            'uploader': info.get('uploader', 'Unknown')
+        }
             
     except yt_dlp.utils.DownloadError as e:
         error_str = str(e)
